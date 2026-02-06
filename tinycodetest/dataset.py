@@ -914,6 +914,37 @@ def dataset_summary(tasks: list[Task]) -> DatasetSummary:
     )
 
 
+def _uniqueness_key(task: Task) -> str:
+    payload = dict(task.to_dict())
+    payload["task_id"] = "__TASK__"
+    payload["function_name"] = "__FN__"
+    payload["signature"] = str(payload.get("signature", "")).replace(task.function_name, "__FN__")
+    payload["canonical_solution"] = str(payload.get("canonical_solution", "")).replace(
+        task.function_name, "__FN__"
+    )
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def validate_dataset_uniqueness(tasks: list[Task]) -> None:
+    """Raise when duplicate logical tasks are found after ID/function-name normalization."""
+    index_by_key: dict[str, int] = {}
+    duplicates: list[tuple[str, str]] = []
+    for idx, task in enumerate(tasks):
+        key = _uniqueness_key(task)
+        first_idx = index_by_key.get(key)
+        if first_idx is None:
+            index_by_key[key] = idx
+            continue
+        duplicates.append((tasks[first_idx].task_id, task.task_id))
+
+    if duplicates:
+        sample = ", ".join(f"{a}=={b}" for a, b in duplicates[:5])
+        raise ValueError(
+            f"Dataset contains {len(duplicates)} duplicate logical tasks. "
+            f"Examples: {sample}"
+        )
+
+
 class TaskSampler:
     def __init__(self, tasks: list[Task]) -> None:
         self._tasks = tasks
@@ -951,6 +982,7 @@ def generate_and_write(
     seed: int = 7,
 ) -> DatasetSummary:
     tasks = build_dataset(total_tasks=total_tasks, seed=seed)
+    validate_dataset_uniqueness(tasks)
     write_dataset(tasks, output_path)
     if adversarial_output_path is not None:
         write_dataset([task for task in tasks if task.adversarial], adversarial_output_path)

@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tinycodetest.dataset import TaskSampler, dataset_summary, generate_and_write, load_dataset
-from tinycodetest.eval_runner import EvalConfig, evaluate_suite, save_eval
+from tinycodetest.eval_runner import EvalConfig, evaluate_suite, save_eval, save_verification_trace
 from tinycodetest.harness import PromptStrategy, SandboxConfig
 from tinycodetest.models import builtin_models, resolve_models
 from tinycodetest.reporting import save_html_report
@@ -34,12 +34,28 @@ RUN_META_DIR = STORAGE_ROOT / "results" / "run_meta"
 DEFAULT_DATASET_PATH = (STORAGE_ROOT / "data" / "tinycodetest.jsonl").resolve()
 DEFAULT_ADVERSARIAL_PATH = (STORAGE_ROOT / "data" / "tinycodetest_adversarial.jsonl").resolve()
 LEGACY_BUNDLE_DEFAULT_PATH = (ROOT / "data" / "tinycodetest.jsonl").resolve()
+DEFAULT_TASKS_LOCAL = 600
+DEFAULT_TASKS_VERCEL = 120
 
 RUNS: dict[str, dict[str, Any]] = {}
 
 
 def _now_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _default_task_count() -> int:
+    fallback = DEFAULT_TASKS_VERCEL if IS_VERCEL else DEFAULT_TASKS_LOCAL
+    raw = os.getenv("TCT_DEFAULT_TASKS", "").strip()
+    if not raw:
+        return fallback
+    try:
+        value = int(raw)
+        if value < 1:
+            return fallback
+        return value
+    except Exception:
+        return fallback
 
 
 def _safe_path_from_input(value: str, *, default: Path | None = None) -> Path:
@@ -66,6 +82,11 @@ def _coerce_float(value: str, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _coerce_bool(value: str | None) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "on"}
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -141,7 +162,7 @@ def _ensure_default_dataset() -> Path:
     if DEFAULT_DATASET_PATH.exists():
         return DEFAULT_DATASET_PATH
     DEFAULT_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tasks = 120 if IS_VERCEL else 600
+    tasks = _default_task_count()
     generate_and_write(
         output_path=DEFAULT_DATASET_PATH,
         adversarial_output_path=DEFAULT_ADVERSARIAL_PATH,
@@ -187,59 +208,6 @@ def _list_runs() -> dict[str, dict[str, Any]]:
             records[run_id] = payload
     records.update(RUNS)
     return records
-
-
-def _build_verification_trace_markdown(payload: dict[str, Any], *, max_tasks: int = 30) -> str:
-    lines: list[str] = [
-        "# Verification Trace",
-        "",
-        "This trace shows verifier outcomes for sampled attempts per task.",
-        "",
-    ]
-
-    runs = list(payload.get("runs", []))
-    if not runs:
-        lines.append("_No runs found in payload._")
-        return "\n".join(lines) + "\n"
-
-    for run in runs:
-        model = run.get("model", "")
-        strategy = run.get("strategy", "")
-        lines.append(f"## {model} / {strategy}")
-        attempts = list(run.get("attempts", []))
-        if not attempts:
-            lines.append("- capture_attempts disabled for this run.")
-            lines.append("")
-            continue
-
-        for record in attempts[:max_tasks]:
-            task_id = record.get("task_id", "")
-            task_attempts = list(record.get("attempts", []))
-            lines.append(f"- **{task_id}**")
-            for idx, attempt in enumerate(task_attempts, start=1):
-                passed = bool(attempt.get("passed", False))
-                verdict = "PASS" if passed else "FAIL"
-                passed_cases = int(attempt.get("passed_cases", 0))
-                total_cases = int(attempt.get("total_cases", 0))
-                reward = float(attempt.get("reward", 0.0))
-                error = attempt.get("error")
-                msg = (
-                    f"  - attempt {idx}: {verdict}, reward={reward:.3f}, "
-                    f"cases={passed_cases}/{total_cases}"
-                )
-                if error:
-                    msg += f", error={error}"
-                lines.append(msg)
-
-                failures = list(attempt.get("failures", []))
-                if failures:
-                    first = failures[0]
-                    reason = first.get("reason", "")
-                    case_idx = first.get("idx", "")
-                    lines.append(f"    - first failure: case={case_idx}, reason={reason}")
-            lines.append("")
-
-    return "\n".join(lines) + "\n"
 
 
 def _render_layout(title: str, body: str) -> bytes:
@@ -398,7 +366,9 @@ def _index_body(error: str = "") -> str:
     default_dataset = str(DEFAULT_DATASET_PATH) if IS_VERCEL else "data/tinycodetest.jsonl"
     default_samples = "2" if IS_VERCEL else "5"
     default_max_tasks = "8" if IS_VERCEL else "40"
-    default_timeout = "0.6" if IS_VERCEL else "0.8"
+    sandbox_defaults = SandboxConfig.for_environment(serverless=IS_VERCEL)
+    default_timeout = f"{sandbox_defaults.timeout_seconds:.1f}"
+    default_memory = str(sandbox_defaults.memory_mb)
     deployment_note = (
         "This deployment is running on Vercel serverless. Files are temporary and run history may reset after cold starts."
         if IS_VERCEL
@@ -496,7 +466,7 @@ def _index_body(error: str = "") -> str:
 
       <div class=\"row3\">
         <div><label>Timeout (seconds)</label><input type=\"number\" step=\"0.1\" name=\"timeout\" value=\"{default_timeout}\" min=\"0.1\" /></div>
-        <div><label>Memory MB</label><input type=\"number\" name=\"memory_mb\" value=\"256\" min=\"64\" /></div>
+        <div><label>Memory MB</label><input type=\"number\" name=\"memory_mb\" value=\"{default_memory}\" min=\"64\" /></div>
         <div><label>Stem (optional)</label><input type=\"text\" name=\"stem\" placeholder=\"web_run_custom\" /></div>
       </div>
 
@@ -505,10 +475,11 @@ def _index_body(error: str = "") -> str:
           <label>Verification Details</label>
           <div class=\"checks\">
             <label class=\"check\"><input type=\"checkbox\" name=\"capture_attempts\" value=\"1\" checked /> Capture per-attempt verifier trace</label>
+            <label class=\"check\"><input type=\"checkbox\" name=\"confidence_intervals\" value=\"1\" /> Add 95% confidence intervals (bootstrap)</label>
           </div>
         </div>
         <div class=\"small\" style=\"align-self:end\">
-          Enabling this writes a <code>.verification.md</code> file showing PASS/FAIL, reward, case counts, and first failure reason for each attempt.
+          Trace capture writes <code>.verification.md</code>. Confidence intervals add uncertainty bands to pass@k in JSON/Markdown/HTML.
         </div>
       </div>
 
@@ -537,6 +508,7 @@ def _index_body(error: str = "") -> str:
       <li>Upload dataset JSONL or use existing dataset path</li>
       <li>Upload model-config JSON or use existing model-config path</li>
       <li>Pick models and prompt strategies</li>
+      <li>Optionally include bootstrap confidence intervals for pass@k</li>
       <li>Run evaluation from browser</li>
       <li>Open JSON, Markdown, and HTML report outputs</li>
       <li>Preview report directly in the run page</li>
@@ -686,6 +658,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _handle_run_from_query(self, params: dict[str, str]) -> str:
         # Fallback for non-multipart posts; mostly for debugging.
+        defaults = SandboxConfig.for_environment(serverless=IS_VERCEL)
         fake = {
             "dataset_path": params.get("dataset_path", str(DEFAULT_DATASET_PATH if IS_VERCEL else "data/tinycodetest.jsonl")),
             "model_config_path": params.get("model_config_path", ""),
@@ -698,10 +671,11 @@ class AppHandler(BaseHTTPRequestHandler):
             "samples_per_task": params.get("samples_per_task", "5"),
             "max_tasks": params.get("max_tasks", "40"),
             "seed": params.get("seed", "13"),
-            "timeout": params.get("timeout", "0.8"),
-            "memory_mb": params.get("memory_mb", "256"),
+            "timeout": params.get("timeout", str(defaults.timeout_seconds)),
+            "memory_mb": params.get("memory_mb", str(defaults.memory_mb)),
             "stem": params.get("stem", ""),
             "capture_attempts": params.get("capture_attempts", "1"),
+            "confidence_intervals": params.get("confidence_intervals", "0"),
             "models": params.get("models", "heuristic-small"),
             "strategies": params.get("strategies", "direct"),
         }
@@ -720,7 +694,8 @@ class AppHandler(BaseHTTPRequestHandler):
             timeout_text=fake["timeout"],
             memory_mb_text=fake["memory_mb"],
             stem_text=fake["stem"],
-            capture_attempts=bool(fake["capture_attempts"]),
+            capture_attempts=_coerce_bool(fake["capture_attempts"]),
+            confidence_intervals=_coerce_bool(fake["confidence_intervals"]),
             api_env_overrides=_collect_api_env_overrides(
                 openai_api_key=fake["openai_api_key"],
                 anthropic_api_key=fake["anthropic_api_key"],
@@ -749,6 +724,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         model_names = [item for item in form.getlist("model") if item]
         strategy_names = [item for item in form.getlist("strategy") if item]
+        defaults = SandboxConfig.for_environment(serverless=IS_VERCEL)
 
         return self._run_eval_job(
             dataset_path=dataset_path,
@@ -760,10 +736,11 @@ class AppHandler(BaseHTTPRequestHandler):
             samples_per_task_text=form.getfirst("samples_per_task", "5"),
             max_tasks_text=form.getfirst("max_tasks", "40"),
             seed_text=form.getfirst("seed", "13"),
-            timeout_text=form.getfirst("timeout", "0.8"),
-            memory_mb_text=form.getfirst("memory_mb", "256"),
+            timeout_text=form.getfirst("timeout", str(defaults.timeout_seconds)),
+            memory_mb_text=form.getfirst("memory_mb", str(defaults.memory_mb)),
             stem_text=form.getfirst("stem", ""),
-            capture_attempts=bool(form.getfirst("capture_attempts", "")),
+            capture_attempts=_coerce_bool(form.getfirst("capture_attempts", "")),
+            confidence_intervals=_coerce_bool(form.getfirst("confidence_intervals", "")),
             api_env_overrides=_collect_api_env_overrides(
                 openai_api_key=form.getfirst("openai_api_key", ""),
                 anthropic_api_key=form.getfirst("anthropic_api_key", ""),
@@ -788,6 +765,7 @@ class AppHandler(BaseHTTPRequestHandler):
         memory_mb_text: str,
         stem_text: str,
         capture_attempts: bool,
+        confidence_intervals: bool,
         api_env_overrides: dict[str, str] | None = None,
     ) -> str:
         if not dataset_path.exists():
@@ -812,8 +790,9 @@ class AppHandler(BaseHTTPRequestHandler):
         samples_per_task = max(1, _coerce_int(samples_per_task_text, 5))
         max_tasks = max(0, _coerce_int(max_tasks_text, 40))
         seed = _coerce_int(seed_text, 13)
-        timeout = max(0.1, _coerce_float(timeout_text, 0.8))
-        memory_mb = max(64, _coerce_int(memory_mb_text, 256))
+        sandbox_defaults = SandboxConfig.for_environment(serverless=IS_VERCEL)
+        timeout = max(0.1, _coerce_float(timeout_text, sandbox_defaults.timeout_seconds))
+        memory_mb = max(64, _coerce_int(memory_mb_text, sandbox_defaults.memory_mb))
         env_overrides = dict(api_env_overrides or {})
 
         run_id = stem_text.strip() or f"web_{_now_stamp()}_{uuid4().hex[:6]}"
@@ -853,6 +832,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         ks=ks,
                         seed=seed,
                         capture_attempts=capture_attempts,
+                        confidence_intervals=confidence_intervals,
                     ),
                 )
             finally:
@@ -875,7 +855,7 @@ class AppHandler(BaseHTTPRequestHandler):
             verify_path = None
             if capture_attempts:
                 verify_path = WEB_RUN_DIR / f"{run_id}.verification.md"
-                verify_path.write_text(_build_verification_trace_markdown(payload), encoding="utf-8")
+                save_verification_trace(payload, verify_path, max_tasks=50)
 
             run_payload = _load_run(run_id) or {}
             run_payload.update(
@@ -887,7 +867,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     "summary": (
                         f"tasks={len(tasks)}; models={','.join(model_names)}; "
                         f"strategies={','.join(strategy_names)}; ks={','.join(str(k) for k in ks)}; "
-                        f"verify_trace={'on' if capture_attempts else 'off'}"
+                        f"verify_trace={'on' if capture_attempts else 'off'}; "
+                        f"ci={'on' if confidence_intervals else 'off'}"
                     ),
                 }
             )
@@ -917,7 +898,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate default dataset if data/tinycodetest.jsonl is missing",
     )
-    parser.add_argument("--tasks", type=int, default=600, help="Task count for auto generation")
+    parser.add_argument(
+        "--tasks",
+        type=int,
+        default=_default_task_count(),
+        help="Task count for auto generation",
+    )
     parser.add_argument("--dataset-seed", type=int, default=7, help="Seed for auto generation")
     return parser.parse_args()
 

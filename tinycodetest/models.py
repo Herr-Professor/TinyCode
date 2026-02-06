@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import sys
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -577,15 +578,90 @@ def _parse_model_config(path: str | Path) -> list[dict[str, Any]]:
     return [dict(spec) for spec in models]
 
 
+def _is_valid_env_var_name(name: str) -> bool:
+    if not name:
+        return False
+    first = name[0]
+    if not (first.isalpha() or first == "_"):
+        return False
+    for char in name[1:]:
+        if not (char.isalnum() or char == "_"):
+            return False
+    return True
+
+
+def _read_float_field(spec: dict[str, Any], field: str, default: float, *, model_name: str) -> float:
+    raw = spec.get(field, default)
+    try:
+        return float(raw)
+    except Exception as exc:
+        raise ValueError(f"Model `{model_name}` field `{field}` must be a number, got `{raw}`.") from exc
+
+
+def _read_int_field(spec: dict[str, Any], field: str, default: int, *, model_name: str) -> int:
+    raw = spec.get(field, default)
+    try:
+        value = int(raw)
+    except Exception as exc:
+        raise ValueError(f"Model `{model_name}` field `{field}` must be an integer, got `{raw}`.") from exc
+    if value < 1:
+        raise ValueError(f"Model `{model_name}` field `{field}` must be >= 1.")
+    return value
+
+
+def _validate_model_spec(spec: dict[str, Any]) -> None:
+    name = str(spec.get("name", "")).strip()
+    if not name:
+        raise ValueError("Each model spec requires a non-empty `name`.")
+
+    kind = str(spec.get("type", "openai-compatible")).strip().lower()
+    supported = {"builtin", "openai-compatible", "anthropic", "gemini"}
+    if kind not in supported:
+        options = ", ".join(sorted(supported))
+        raise ValueError(f"Unsupported model type `{kind}` in config for `{name}`. Supported: {options}")
+
+    if kind == "builtin":
+        builtin_name = str(spec.get("builtin", name)).strip()
+        if not builtin_name:
+            raise ValueError(f"Model `{name}` type `builtin` requires non-empty field `builtin`.")
+        return
+
+    model_name = str(spec.get("model", "")).strip()
+    if not model_name:
+        raise ValueError(f"Model `{name}`: missing required field `model` for type `{kind}`.")
+
+    _read_float_field(spec, "temperature", 0.2, model_name=name)
+    _read_int_field(spec, "max_tokens", 512, model_name=name)
+
+    api_key_env = str(
+        spec.get(
+            "api_key_env",
+            "OPENAI_API_KEY" if kind == "openai-compatible" else "ANTHROPIC_API_KEY" if kind == "anthropic" else "GEMINI_API_KEY",
+        )
+    ).strip()
+    if not api_key_env:
+        raise ValueError(f"Model `{name}` field `api_key_env` must be non-empty.")
+    if not _is_valid_env_var_name(api_key_env):
+        raise ValueError(f"Model `{name}` has invalid api_key_env `{api_key_env}`.")
+    if api_key_env not in os.environ:
+        print(
+            f"Warning: `{api_key_env}` not set for model `{name}`. "
+            "It may still be injected at runtime.",
+            file=sys.stderr,
+        )
+
+    headers = spec.get("headers", {})
+    if headers is not None and not isinstance(headers, dict):
+        raise ValueError(f"Model `{name}` field `headers` must be an object.")
+
+
 def models_from_config(path: str | Path) -> dict[str, ModelAdapter]:
     registry = builtin_models()
     specs = _parse_model_config(path)
 
     for spec in specs:
+        _validate_model_spec(spec)
         name = str(spec.get("name", "")).strip()
-        if not name:
-            raise ValueError("Each model spec requires a non-empty `name`.")
-
         kind = str(spec.get("type", "openai-compatible")).strip().lower()
         if kind == "builtin":
             builtin_name = str(spec.get("builtin", name)).strip()
@@ -598,13 +674,11 @@ def models_from_config(path: str | Path) -> dict[str, ModelAdapter]:
             continue
 
         model_name = str(spec.get("model", "")).strip()
-        temperature = float(spec.get("temperature", 0.2))
-        max_tokens = int(spec.get("max_tokens", 512))
+        temperature = _read_float_field(spec, "temperature", 0.2, model_name=name)
+        max_tokens = _read_int_field(spec, "max_tokens", 512, model_name=name)
         headers = spec.get("headers", {})
         if headers is None:
             headers = {}
-        if not isinstance(headers, dict):
-            raise ValueError(f"Model `{name}` field `headers` must be an object.")
         header_map = {str(k): str(v) for k, v in headers.items()}
 
         if kind == "openai-compatible":

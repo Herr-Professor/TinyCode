@@ -19,16 +19,26 @@ This environment is designed as research infrastructure, not just a toy task:
 - `tinycodetest/harness.py`: prompt strategies (`direct`, `plan_then_code`)
 - `tinycodetest/verifier.py`: sandboxed execution + deterministic scoring
 - `tinycodetest/environment.py`: `TinyCodeTestEnvironment` (`sample`, `prompt`, `verify`)
+- `tinycodetest/verifiers_adapter.py`: optional Verifiers bridge (`TinyCodeVerifiersEnv`) when `verifiers` is installed
 - `tinycodetest/eval_runner.py`: `pass@k`, difficulty/adversarial metrics, leaderboard export
 - `scripts/generate_dataset.py`: build dataset JSONL files
 - `scripts/run_eval.py`: evaluate one or more model adapters and save JSON/MD
 - `scripts/run_baselines.py`: convenience baseline run
 - `scripts/generate_report.py`: generate an HTML dashboard report from eval JSON
+- `scripts/export_verification_trace.py`: export readable verification trace from eval JSON
 - `scripts/validate_dataset.py`: validate dataset shape and optional canonical correctness
 - `scripts/export_train_data.py`: export prompt/completion JSONL for fine-tuning
 - `scripts/web_app.py`: local web UI (upload dataset, pick models, run eval, view report)
 - `configs/models.example.json`: example multi-model API registry config
 - `docs/one_pager.md`: benchmark one-pager (what it measures + failure modes)
+
+## Built-In Baseline Models
+- `heuristic-small`: pattern-matching baseline for easier templates; intentionally degrades about 35% of post-first samples
+- `heuristic-medium`: broader pattern matcher covering medium templates; intentionally degrades about 20% of post-first samples
+- `reference-oracle`: returns canonical solutions (upper-bound sanity baseline)
+- `openai-compatible`: generic API-backed adapter for OpenAI-compatible chat endpoints
+- `anthropic`: native Anthropic Messages API adapter
+- `gemini`: native Gemini `generateContent` adapter
 
 ## Quickstart
 
@@ -126,6 +136,42 @@ python3 scripts/generate_report.py \
   --output results/byo_models.html
 ```
 
+Export a readable verification trace from any eval JSON:
+```bash
+python3 scripts/export_verification_trace.py \
+  --input results/byo_models.json \
+  --output results/byo_models.verification.md \
+  --max-tasks 50
+```
+
+Enable optional pass@k uncertainty intervals in eval outputs:
+```bash
+python3 scripts/run_eval.py \
+  --dataset data/tinycodetest.jsonl \
+  --models heuristic-small,heuristic-medium \
+  --strategies direct \
+  --samples-per-task 20 \
+  --max-tasks 120 \
+  --confidence-intervals \
+  --generate-report \
+  --output-dir results \
+  --stem ci_example
+```
+
+### Optional Verifiers Adapter
+TinyCodeTest remains standalone. If you also want Verifiers integration:
+```bash
+pip install verifiers
+```
+
+```python
+from tinycodetest.verifiers_adapter import create_verifiers_env
+
+env = create_verifiers_env("data/tinycodetest.jsonl")
+episode = env.reset()
+reward = env.step("def ...")
+```
+
 ### 7) Web App Wrapper (Upload + Pick Models + Run + View)
 ```bash
 python3 scripts/web_app.py --host 127.0.0.1 --port 8787 --auto-generate-dataset
@@ -140,6 +186,7 @@ Web UI features:
 - upload/select model config JSON and pick models
 - enter provider API keys in the form (OpenAI, Anthropic, Gemini) or custom `KEY=value` env entries per run
 - choose strategies + eval settings
+- optional pass@k confidence intervals (95% bootstrap)
 - run evaluation from the browser
 - open JSON/Markdown/HTML artifacts and preview report directly
 - optional verification trace output (`.verification.md`) that shows verifier results per task attempt (PASS/FAIL, reward, case counts, first failure reason)
@@ -148,7 +195,9 @@ Web UI features:
 Notes:
 - Deploy returns a preview URL and claim URL.
 - On Vercel, run files are stored in temporary server storage (`/tmp/...`) and may reset.
-- If the default dataset path does not exist on Vercel, the app auto-generates a small default dataset in `/tmp`.
+- If the default dataset path does not exist, the app auto-generates one in `/tmp` (Vercel) or local workspace.
+- Default auto-generated task count is environment-aware: local=`600`, Vercel=`120`.
+- Override default generation size with `TCT_DEFAULT_TASKS`, for example: `TCT_DEFAULT_TASKS=300`.
 - In a run page, click `VERIFY` to inspect the per-attempt verification trace.
 - If you want a stable managed domain, claim the deployment URL and redeploy from your claimed project.
 
@@ -176,6 +225,10 @@ Each task has fixed test cases, so reward is deterministic for a given completio
 - `mean_reward`: average fraction of tests passed
 - adversarial metrics: same scoring restricted to `adversarial=true` tasks
 - bucket metrics: separate scores for easy/medium/hard
+- optional uncertainty mode: `--confidence-intervals` adds 95% bootstrap CIs to JSON/Markdown/HTML report views
+
+Sampling note:
+- `pass@k` is a point estimate and has variance at small `n`; use larger sample counts (for example, `n>=20`) when comparing close models.
 
 ## Baseline Snapshot (2026-02-05 UTC, 120-task slice)
 Source artifacts:

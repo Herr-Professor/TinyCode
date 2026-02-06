@@ -29,3 +29,9 @@ Reward is deterministic because verifier logic is deterministic and uses fixed t
 - High `pass@1` and increasing `pass@5` without reward instability
 - Adversarial performance close to standard split (small drop)
 - Reproducible results across seeds and reruns
+
+## Interpreting Uncertainty
+- Confidence intervals are optional (`--confidence-intervals`) and are computed with bootstrap resampling.
+- Intervals are shown for pass@k metrics in JSON, leaderboard markdown, and HTML report error bars.
+- With low sample counts (`samples_per_task` or `max_tasks` too small), intervals can be wide.
+- For tighter comparisons, increase both task count and samples per task (for example `samples_per_task >= 10`).

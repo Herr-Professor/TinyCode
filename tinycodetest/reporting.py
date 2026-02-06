@@ -33,6 +33,12 @@ def _compact_text(value: object, *, max_len: int = 180) -> str:
     return text[: max_len - 1] + "…"
 
 
+def _ci_triplet(value: object) -> tuple[float, float, float] | None:
+    if not isinstance(value, list) or len(value) != 3:
+        return None
+    return (_to_float(value[0]), _to_float(value[1]), _to_float(value[2]))
+
+
 def _sort_runs(payload: dict[str, object]) -> list[dict[str, object]]:
     config = dict(payload.get("config", {}))
     ks = sorted(_to_int(value, 1) for value in config.get("ks", [1]))
@@ -100,11 +106,16 @@ def _bar_chart(
     bar_color: str,
     label_color: str,
     grid_color: str,
+    lower_bounds: list[float] | None = None,
+    upper_bounds: list[float] | None = None,
+    error_color: str = "#52626a",
     pad: int = 24,
 ) -> str:
     if not values:
         return ""
     top = max(values)
+    if upper_bounds and len(upper_bounds) == len(values):
+        top = max(top, max(upper_bounds))
     if top <= 0:
         top = 1e-9
 
@@ -127,6 +138,30 @@ def _bar_chart(
         parts.append(
             f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w}" height="{bar_h:.1f}" rx="4" fill="{bar_color}" />'
         )
+
+        if (
+            lower_bounds
+            and upper_bounds
+            and len(lower_bounds) == len(values)
+            and len(upper_bounds) == len(values)
+        ):
+            low = max(0.0, min(top, float(lower_bounds[idx])))
+            high = max(0.0, min(top, float(upper_bounds[idx])))
+            if high < low:
+                low, high = high, low
+            y_low = height - pad - ((low / top) * (height - (2 * pad)))
+            y_high = height - pad - ((high / top) * (height - (2 * pad)))
+            x_mid = x + (bar_w / 2.0)
+            cap = max(3.0, bar_w * 0.25)
+            parts.append(
+                f'<line x1="{x_mid:.1f}" y1="{y_low:.1f}" x2="{x_mid:.1f}" y2="{y_high:.1f}" stroke="{error_color}" stroke-width="1.2" />'
+            )
+            parts.append(
+                f'<line x1="{(x_mid - cap):.1f}" y1="{y_low:.1f}" x2="{(x_mid + cap):.1f}" y2="{y_low:.1f}" stroke="{error_color}" stroke-width="1.2" />'
+            )
+            parts.append(
+                f'<line x1="{(x_mid - cap):.1f}" y1="{y_high:.1f}" x2="{(x_mid + cap):.1f}" y2="{y_high:.1f}" stroke="{error_color}" stroke-width="1.2" />'
+            )
 
         label = _esc(labels[idx][:18])
         parts.append(
@@ -334,9 +369,46 @@ def render_report_html(payload: dict[str, object], *, title: str = "TinyCodeTest
     config = dict(payload.get("config", {}))
     ks = sorted(_to_int(k, 1) for k in config.get("ks", [1]))
     pass_key = f"pass@{ks[0]}"
+    show_ci = bool(config.get("confidence_intervals", False))
+    confidence_level = _to_float(config.get("confidence_level", 0.95), 0.95)
+    confidence_pct = int(round(confidence_level * 100.0))
+
+    def _run_ci(
+        run: dict[str, object],
+        metric: str,
+        *,
+        split: str = "overall",
+        difficulty_label: str = "",
+    ) -> tuple[float, float, float] | None:
+        ci_root = dict(run.get("confidence_intervals", {}))
+        if split == "overall":
+            metric_map = dict(ci_root.get("overall", {}))
+        elif split == "adversarial":
+            metric_map = dict(ci_root.get("adversarial", {}))
+        elif split == "difficulty":
+            diff_root = dict(ci_root.get("difficulty", {}))
+            metric_map = dict(diff_root.get(difficulty_label, {}))
+        else:
+            metric_map = {}
+        return _ci_triplet(metric_map.get(metric))
 
     model_labels = [f"{run.get('model', '')}/{run.get('strategy', '')}" for run in runs]
     model_scores = [_to_float(dict(run.get("overall", {})).get(pass_key, 0.0)) for run in runs]
+    model_ci_lower = None
+    model_ci_upper = None
+    if show_ci:
+        lows: list[float] = []
+        highs: list[float] = []
+        for run, score in zip(runs, model_scores):
+            ci = _run_ci(run, pass_key, split="overall")
+            if ci is None:
+                lows.append(score)
+                highs.append(score)
+            else:
+                lows.append(ci[1])
+                highs.append(ci[2])
+        model_ci_lower = lows
+        model_ci_upper = highs
     model_svg = _bar_chart(
         model_labels,
         model_scores,
@@ -345,11 +417,28 @@ def render_report_html(payload: dict[str, object], *, title: str = "TinyCodeTest
         bar_color="#1f8a8a",
         label_color="#697577",
         grid_color="#eef1e8",
+        lower_bounds=model_ci_lower,
+        upper_bounds=model_ci_upper,
     )
 
     difficulty = dict(best.get("difficulty", {}))
     diff_labels = ["easy", "medium", "hard"]
     diff_scores = [_to_float(dict(difficulty.get(lbl, {})).get(pass_key, 0.0)) for lbl in diff_labels]
+    diff_ci_lower = None
+    diff_ci_upper = None
+    if show_ci:
+        lows = []
+        highs = []
+        for label, score in zip(diff_labels, diff_scores):
+            ci = _run_ci(best, pass_key, split="difficulty", difficulty_label=label)
+            if ci is None:
+                lows.append(score)
+                highs.append(score)
+            else:
+                lows.append(ci[1])
+                highs.append(ci[2])
+        diff_ci_lower = lows
+        diff_ci_upper = highs
     diff_svg = _bar_chart(
         diff_labels,
         diff_scores,
@@ -358,6 +447,8 @@ def render_report_html(payload: dict[str, object], *, title: str = "TinyCodeTest
         bar_color="#2f9f74",
         label_color="#697577",
         grid_color="#eef1e8",
+        lower_bounds=diff_ci_lower,
+        upper_bounds=diff_ci_upper,
     )
 
     verify_summaries, failure_counts, trace_sections = _collect_verification_details(runs)
@@ -373,6 +464,14 @@ def render_report_html(payload: dict[str, object], *, title: str = "TinyCodeTest
         if verify is not None:
             verify_rate = f"{_to_float(verify.get('attempt_pass_rate', 0.0)) * 100.0:.1f}%"
 
+        ci_cell = ""
+        if show_ci:
+            ci = _run_ci(run, pass_key, split="overall")
+            if ci is None:
+                ci_cell = "<td>n/a</td>"
+            else:
+                ci_cell = f"<td>[{ci[1]:.3f}, {ci[2]:.3f}]</td>"
+
         run_rows.append(
             "<tr>"
             f"<td>{idx}</td>"
@@ -380,12 +479,20 @@ def render_report_html(payload: dict[str, object], *, title: str = "TinyCodeTest
             f"<td>{_esc(run.get('strategy', ''))}</td>"
             f"<td>{_to_float(overall.get(pass_key, 0.0)):.3f}</td>"
             f"<td>{_to_float(overall.get(f'pass@{ks[-1]}', 0.0)):.3f}</td>"
+            f"{ci_cell}"
             f"<td>{_to_float(adv.get(pass_key, 0.0)):.3f}</td>"
             f"<td>{_to_float(overall.get('mean_reward', 0.0)):.3f}</td>"
             f"<td>{_to_float(overall.get('avg_runtime_ms', 0.0)):.1f}</td>"
             f"<td>{verify_rate}</td>"
             "</tr>"
         )
+
+    ci_header_cell = f"<th>{confidence_pct}% CI ({_esc(pass_key)})</th>" if show_ci else ""
+    ci_model_note = (
+        f"Bars include {confidence_pct}% bootstrap confidence intervals."
+        if show_ci
+        else "Enable <code>--confidence-intervals</code> to display uncertainty error bars."
+    )
 
     verify_rows = []
     for item in verify_summaries:
@@ -628,7 +735,7 @@ def render_report_html(payload: dict[str, object], *, title: str = "TinyCodeTest
     <div class=\"grid2\">
       <div class=\"card\">
         <h2>Run Comparison ({_esc(pass_key)})</h2>
-        <div class=\"sub\">Higher bars indicate stronger overall pass rate.</div>
+        <div class=\"sub\">Higher bars indicate stronger overall pass rate. {ci_model_note}</div>
         <svg viewBox=\"0 0 760 240\" preserveAspectRatio=\"none\">{model_svg}</svg>
       </div>
       <div class=\"card\">
@@ -641,7 +748,7 @@ def render_report_html(payload: dict[str, object], *, title: str = "TinyCodeTest
     <div class=\"card\">
       <h2>Leaderboard Snapshot</h2>
       <table>
-        <thead><tr><th>#</th><th>Model</th><th>Strategy</th><th>{_esc(pass_key)}</th><th>pass@{ks[-1]}</th><th>Adv {_esc(pass_key)}</th><th>Mean Reward</th><th>Avg Runtime ms</th><th>Attempt Pass Rate</th></tr></thead>
+        <thead><tr><th>#</th><th>Model</th><th>Strategy</th><th>{_esc(pass_key)}</th><th>pass@{ks[-1]}</th>{ci_header_cell}<th>Adv {_esc(pass_key)}</th><th>Mean Reward</th><th>Avg Runtime ms</th><th>Attempt Pass Rate</th></tr></thead>
         <tbody>
           {''.join(run_rows)}
         </tbody>

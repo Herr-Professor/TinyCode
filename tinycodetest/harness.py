@@ -16,6 +16,12 @@ class SandboxConfig:
     timeout_seconds: float = 2.0
     memory_mb: int = 256
 
+    @classmethod
+    def for_environment(cls, *, serverless: bool = False) -> "SandboxConfig":
+        if serverless:
+            return cls(timeout_seconds=0.6, memory_mb=256)
+        return cls(timeout_seconds=2.0, memory_mb=256)
+
 
 @dataclass(frozen=True)
 class HarnessRequest:

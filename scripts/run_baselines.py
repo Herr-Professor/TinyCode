@@ -19,6 +19,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-task", type=int, default=5)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--include-oracle", action="store_true", help="Include reference-oracle baseline")
+    parser.add_argument(
+        "--confidence-intervals",
+        action="store_true",
+        help="Pass through to run_eval.py to include bootstrap confidence intervals in outputs",
+    )
     return parser.parse_args()
 
 
@@ -49,6 +54,8 @@ def main() -> None:
         "--output-dir",
         args.output_dir,
     ]
+    if args.confidence_intervals:
+        command.append("--confidence-intervals")
 
     completed = subprocess.run(command, check=False)
     raise SystemExit(completed.returncode)

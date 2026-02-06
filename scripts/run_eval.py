@@ -11,7 +11,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tinycodetest.dataset import TaskSampler, dataset_summary, generate_and_write, load_dataset
-from tinycodetest.eval_runner import EvalConfig, evaluate_suite, leaderboard_markdown, save_eval
+from tinycodetest.eval_runner import (
+    EvalConfig,
+    evaluate_suite,
+    leaderboard_markdown,
+    save_eval,
+    save_verification_trace,
+)
 from tinycodetest.harness import PromptStrategy, SandboxConfig
 from tinycodetest.models import resolve_models
 from tinycodetest.reporting import save_html_report
@@ -22,6 +28,7 @@ def _parse_csv(values: str) -> list[str]:
 
 
 def parse_args() -> argparse.Namespace:
+    default_sandbox = SandboxConfig.for_environment(serverless=False)
     parser = argparse.ArgumentParser(description="Run TinyCodeTest benchmark evaluation.")
     parser.add_argument("--dataset", default="data/tinycodetest.jsonl", help="Dataset JSONL path")
     parser.add_argument("--auto-generate", action="store_true", help="Generate dataset if missing")
@@ -40,10 +47,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tasks", type=int, default=0, help="Evaluate only a random subset (0 = all)")
     parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], default=None)
     parser.add_argument("--adversarial-only", action="store_true", help="Use only adversarial tasks")
-    parser.add_argument("--timeout", type=float, default=2.0, help="Verifier timeout per attempt (seconds)")
-    parser.add_argument("--memory-mb", type=int, default=256, help="Memory cap for verifier subprocess")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=default_sandbox.timeout_seconds,
+        help="Verifier timeout per attempt (seconds)",
+    )
+    parser.add_argument(
+        "--memory-mb",
+        type=int,
+        default=default_sandbox.memory_mb,
+        help="Memory cap for verifier subprocess",
+    )
     parser.add_argument("--output-dir", default="results", help="Directory for JSON + leaderboard outputs")
     parser.add_argument("--capture-attempts", action="store_true", help="Include per-attempt records in JSON")
+    parser.add_argument(
+        "--confidence-intervals",
+        action="store_true",
+        help="Include bootstrap 95%% confidence intervals for pass@k in JSON/Markdown/HTML outputs",
+    )
+    parser.add_argument(
+        "--export-verification-trace",
+        action="store_true",
+        help="Write a human-readable verification trace markdown file (requires --capture-attempts for rich output)",
+    )
     parser.add_argument(
         "--generate-report",
         action="store_true",
@@ -104,6 +131,7 @@ def main() -> None:
         ks=ks,
         seed=args.seed,
         capture_attempts=args.capture_attempts,
+        confidence_intervals=args.confidence_intervals,
     )
 
     payload = evaluate_suite(
@@ -130,14 +158,19 @@ def main() -> None:
 
     json_path, md_path = save_eval(payload, output_dir=args.output_dir, stem=stem)
     html_path = None
+    trace_path = None
     if args.generate_report:
         html_path = save_html_report(payload, Path(args.output_dir) / f"{stem}.html")
+    if args.export_verification_trace:
+        trace_path = save_verification_trace(payload, Path(args.output_dir) / f"{stem}.verification.md")
 
     print(leaderboard_markdown(payload))
     print(f"JSON: {json_path}")
     print(f"Leaderboard: {md_path}")
     if html_path is not None:
         print(f"HTML report: {html_path}")
+    if trace_path is not None:
+        print(f"Verification trace: {trace_path}")
 
 
 if __name__ == "__main__":
