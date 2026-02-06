@@ -31,6 +31,9 @@ UPLOAD_DIR = STORAGE_ROOT / "data" / "uploads"
 MODEL_CONFIG_UPLOAD_DIR = STORAGE_ROOT / "configs" / "uploads"
 WEB_RUN_DIR = STORAGE_ROOT / "results" / "web_runs"
 RUN_META_DIR = STORAGE_ROOT / "results" / "run_meta"
+DEFAULT_DATASET_PATH = (STORAGE_ROOT / "data" / "tinycodetest.jsonl").resolve()
+DEFAULT_ADVERSARIAL_PATH = (STORAGE_ROOT / "data" / "tinycodetest_adversarial.jsonl").resolve()
+LEGACY_BUNDLE_DEFAULT_PATH = (ROOT / "data" / "tinycodetest.jsonl").resolve()
 
 RUNS: dict[str, dict[str, Any]] = {}
 
@@ -80,6 +83,28 @@ def _save_uploaded_file(field: cgi.FieldStorage, target_dir: Path, suffix: str) 
     return out_path
 
 
+def _is_default_dataset_request(dataset_path: Path) -> bool:
+    resolved = dataset_path.resolve()
+    if resolved == DEFAULT_DATASET_PATH or resolved == LEGACY_BUNDLE_DEFAULT_PATH:
+        return True
+    normalized = str(resolved).replace("\\", "/")
+    return normalized.endswith("/data/tinycodetest.jsonl")
+
+
+def _ensure_default_dataset() -> Path:
+    if DEFAULT_DATASET_PATH.exists():
+        return DEFAULT_DATASET_PATH
+    DEFAULT_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tasks = 120 if IS_VERCEL else 600
+    generate_and_write(
+        output_path=DEFAULT_DATASET_PATH,
+        adversarial_output_path=DEFAULT_ADVERSARIAL_PATH,
+        total_tasks=tasks,
+        seed=7,
+    )
+    return DEFAULT_DATASET_PATH
+
+
 def _run_meta_path(run_id: str) -> Path:
     return RUN_META_DIR / f"{run_id}.json"
 
@@ -116,6 +141,59 @@ def _list_runs() -> dict[str, dict[str, Any]]:
             records[run_id] = payload
     records.update(RUNS)
     return records
+
+
+def _build_verification_trace_markdown(payload: dict[str, Any], *, max_tasks: int = 30) -> str:
+    lines: list[str] = [
+        "# Verification Trace",
+        "",
+        "This trace shows verifier outcomes for sampled attempts per task.",
+        "",
+    ]
+
+    runs = list(payload.get("runs", []))
+    if not runs:
+        lines.append("_No runs found in payload._")
+        return "\n".join(lines) + "\n"
+
+    for run in runs:
+        model = run.get("model", "")
+        strategy = run.get("strategy", "")
+        lines.append(f"## {model} / {strategy}")
+        attempts = list(run.get("attempts", []))
+        if not attempts:
+            lines.append("- capture_attempts disabled for this run.")
+            lines.append("")
+            continue
+
+        for record in attempts[:max_tasks]:
+            task_id = record.get("task_id", "")
+            task_attempts = list(record.get("attempts", []))
+            lines.append(f"- **{task_id}**")
+            for idx, attempt in enumerate(task_attempts, start=1):
+                passed = bool(attempt.get("passed", False))
+                verdict = "PASS" if passed else "FAIL"
+                passed_cases = int(attempt.get("passed_cases", 0))
+                total_cases = int(attempt.get("total_cases", 0))
+                reward = float(attempt.get("reward", 0.0))
+                error = attempt.get("error")
+                msg = (
+                    f"  - attempt {idx}: {verdict}, reward={reward:.3f}, "
+                    f"cases={passed_cases}/{total_cases}"
+                )
+                if error:
+                    msg += f", error={error}"
+                lines.append(msg)
+
+                failures = list(attempt.get("failures", []))
+                if failures:
+                    first = failures[0]
+                    reason = first.get("reason", "")
+                    case_idx = first.get("idx", "")
+                    lines.append(f"    - first failure: case={case_idx}, reason={reason}")
+            lines.append("")
+
+    return "\n".join(lines) + "\n"
 
 
 def _render_layout(title: str, body: str) -> bytes:
@@ -270,11 +348,7 @@ def _list_recent_runs() -> str:
 
 def _index_body(error: str = "") -> str:
     builtin = sorted(builtin_models().keys())
-    default_dataset = (
-        str((ROOT / "data" / "tinycodetest.jsonl").resolve())
-        if IS_VERCEL
-        else "data/tinycodetest.jsonl"
-    )
+    default_dataset = str(DEFAULT_DATASET_PATH) if IS_VERCEL else "data/tinycodetest.jsonl"
     default_samples = "2" if IS_VERCEL else "5"
     default_max_tasks = "8" if IS_VERCEL else "40"
     default_timeout = "0.6" if IS_VERCEL else "0.8"
@@ -363,6 +437,18 @@ def _index_body(error: str = "") -> str:
         <div><label>Stem (optional)</label><input type=\"text\" name=\"stem\" placeholder=\"web_run_custom\" /></div>
       </div>
 
+      <div class=\"row\">
+        <div>
+          <label>Verification Details</label>
+          <div class=\"checks\">
+            <label class=\"check\"><input type=\"checkbox\" name=\"capture_attempts\" value=\"1\" checked /> Capture per-attempt verifier trace</label>
+          </div>
+        </div>
+        <div class=\"small\" style=\"align-self:end\">
+          Enabling this writes a <code>.verification.md</code> file showing PASS/FAIL, reward, case counts, and first failure reason for each attempt.
+        </div>
+      </div>
+
       <div class=\"actions\">
         <button type=\"submit\" class=\"btn\">Run Evaluation</button>
         <span class=\"small\">JSON + leaderboard + HTML report are generated automatically.</span>
@@ -414,16 +500,17 @@ def _run_page(run_id: str) -> tuple[int, bytes]:
     err_block = f'<div class="error" style="margin-top:10px">{html.escape(str(err))}</div>' if err else ""
 
     links = []
-    for kind in ["json", "md", "html"]:
+    for kind in ["json", "md", "html", "verify"]:
         if kind in run:
-            links.append(f'<a href="/artifact/{html.escape(run_id)}/{kind}" target="_blank">{kind.upper()}</a>')
+            label = "VERIFY" if kind == "verify" else kind.upper()
+            links.append(f'<a href="/artifact/{html.escape(run_id)}/{kind}" target="_blank">{label}</a>')
 
     iframe = ""
     if "html" in run:
         iframe = f'<div class="card"><h2>Report Preview</h2><iframe src="/artifact/{html.escape(run_id)}/html"></iframe></div>'
 
     path_lines = []
-    for kind in ["json", "md", "html"]:
+    for kind in ["json", "md", "html", "verify"]:
         if kind in run:
             path_lines.append(f"<li><code>{html.escape(str(run[kind]))}</code></li>")
     paths_block = f"<ul>{''.join(path_lines)}</ul>" if path_lines else '<div class="small">No artifacts yet.</div>'
@@ -490,7 +577,7 @@ class AppHandler(BaseHTTPRequestHandler):
             content = file_path.read_bytes()
             if kind == "json":
                 ctype = "application/json; charset=utf-8"
-            elif kind == "md":
+            elif kind in {"md", "verify"}:
                 ctype = "text/markdown; charset=utf-8"
             else:
                 ctype = "text/html; charset=utf-8"
@@ -537,7 +624,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def _handle_run_from_query(self, params: dict[str, str]) -> str:
         # Fallback for non-multipart posts; mostly for debugging.
         fake = {
-            "dataset_path": params.get("dataset_path", "data/tinycodetest.jsonl"),
+            "dataset_path": params.get("dataset_path", str(DEFAULT_DATASET_PATH if IS_VERCEL else "data/tinycodetest.jsonl")),
             "model_config_path": params.get("model_config_path", ""),
             "extra_models": params.get("extra_models", ""),
             "ks": params.get("ks", "1,5"),
@@ -547,6 +634,7 @@ class AppHandler(BaseHTTPRequestHandler):
             "timeout": params.get("timeout", "0.8"),
             "memory_mb": params.get("memory_mb", "256"),
             "stem": params.get("stem", ""),
+            "capture_attempts": params.get("capture_attempts", "1"),
             "models": params.get("models", "heuristic-small"),
             "strategies": params.get("strategies", "direct"),
         }
@@ -565,6 +653,7 @@ class AppHandler(BaseHTTPRequestHandler):
             timeout_text=fake["timeout"],
             memory_mb_text=fake["memory_mb"],
             stem_text=fake["stem"],
+            capture_attempts=bool(fake["capture_attempts"]),
         )
 
     def _handle_run_from_form(self, form: cgi.FieldStorage) -> str:
@@ -601,6 +690,7 @@ class AppHandler(BaseHTTPRequestHandler):
             timeout_text=form.getfirst("timeout", "0.8"),
             memory_mb_text=form.getfirst("memory_mb", "256"),
             stem_text=form.getfirst("stem", ""),
+            capture_attempts=bool(form.getfirst("capture_attempts", "")),
         )
 
     def _run_eval_job(
@@ -618,9 +708,15 @@ class AppHandler(BaseHTTPRequestHandler):
         timeout_text: str,
         memory_mb_text: str,
         stem_text: str,
+        capture_attempts: bool,
     ) -> str:
         if not dataset_path.exists():
-            raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+            if _is_default_dataset_request(dataset_path):
+                dataset_path = _ensure_default_dataset()
+            else:
+                raise FileNotFoundError(
+                    f"Dataset not found: {dataset_path}. Upload a dataset JSONL or provide an existing path."
+                )
 
         if not model_names and not extra_models:
             model_names = ["heuristic-small"]
@@ -666,7 +762,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 strategies=strategies,
                 tasks=tasks,
                 sandbox=SandboxConfig(timeout_seconds=timeout, memory_mb=memory_mb),
-                config=EvalConfig(samples_per_task=samples_per_task, ks=ks, seed=seed, capture_attempts=False),
+                config=EvalConfig(
+                    samples_per_task=samples_per_task,
+                    ks=ks,
+                    seed=seed,
+                    capture_attempts=capture_attempts,
+                ),
             )
             payload["config"]["model_config"] = str(model_config_path) if model_config_path else None
             payload["dataset"] = {
@@ -677,6 +778,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
             json_path, md_path = save_eval(payload, WEB_RUN_DIR, run_id)
             html_path = save_html_report(payload, WEB_RUN_DIR / f"{run_id}.html")
+            verify_path = None
+            if capture_attempts:
+                verify_path = WEB_RUN_DIR / f"{run_id}.verification.md"
+                verify_path.write_text(_build_verification_trace_markdown(payload), encoding="utf-8")
 
             run_payload = _load_run(run_id) or {}
             run_payload.update(
@@ -687,10 +792,13 @@ class AppHandler(BaseHTTPRequestHandler):
                     "html": str(html_path),
                     "summary": (
                         f"tasks={len(tasks)}; models={','.join(model_names)}; "
-                        f"strategies={','.join(strategy_names)}; ks={','.join(str(k) for k in ks)}"
+                        f"strategies={','.join(strategy_names)}; ks={','.join(str(k) for k in ks)}; "
+                        f"verify_trace={'on' if capture_attempts else 'off'}"
                     ),
                 }
             )
+            if verify_path is not None:
+                run_payload["verify"] = str(verify_path)
             _save_run(run_id, run_payload)
         except Exception as exc:
             run_payload = _load_run(run_id) or {}
@@ -722,11 +830,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    dataset_default = ROOT / "data" / "tinycodetest.jsonl"
+    dataset_default = DEFAULT_DATASET_PATH
     if args.auto_generate_dataset and not dataset_default.exists():
         generate_and_write(
             output_path=dataset_default,
-            adversarial_output_path=ROOT / "data" / "tinycodetest_adversarial.jsonl",
+            adversarial_output_path=DEFAULT_ADVERSARIAL_PATH,
             total_tasks=args.tasks,
             seed=args.dataset_seed,
         )

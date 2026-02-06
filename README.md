@@ -126,7 +126,6 @@ python3 scripts/web_app.py --host 127.0.0.1 --port 8787 --auto-generate-dataset
 Open:
 - `https://skill-deploy-c2xu51b9yp.vercel.app/`
 - `http://127.0.0.1:8787`
-- Local dev still available at `http://127.0.0.1:8787`.
 
 Web UI features:
 - upload a dataset JSONL or use an existing path
@@ -134,11 +133,14 @@ Web UI features:
 - choose strategies + eval settings
 - run evaluation from the browser
 - open JSON/Markdown/HTML artifacts and preview report directly
-- run list is in-memory for the current server session; artifacts stay on disk in `results/web_runs/`
+- optional verification trace output (`.verification.md`) that shows verifier results per task attempt (PASS/FAIL, reward, case counts, first failure reason)
+- run metadata is saved in `results/run_meta/` (or `/tmp/...` on Vercel) and artifacts in `results/web_runs/`
 
 Notes:
 - Deploy returns a preview URL and claim URL.
 - On Vercel, run files are stored in temporary server storage (`/tmp/...`) and may reset.
+- If the default dataset path does not exist on Vercel, the app auto-generates a small default dataset in `/tmp`.
+- In a run page, click `VERIFY` to inspect the per-attempt verification trace.
 - If you want a stable managed domain, claim the deployment URL and redeploy from your claimed project.
 
 ## Dataset Design
