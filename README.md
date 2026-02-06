@@ -124,8 +124,9 @@ python3 scripts/web_app.py --host 127.0.0.1 --port 8787 --auto-generate-dataset
 ```
 
 Open:
+- `https://skill-deploy-c2xu51b9yp.vercel.app/`
 - `http://127.0.0.1:8787`
-- This wrapper is local-only unless you deploy it separately; it will not update any existing Vercel URL automatically.
+- Local dev still available at `http://127.0.0.1:8787`.
 
 Web UI features:
 - upload a dataset JSONL or use an existing path
