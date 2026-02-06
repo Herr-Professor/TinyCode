@@ -330,8 +330,7 @@ def _render_layout(title: str, body: str) -> bytes:
 <body>
   <div class=\"wrap\">
     <div class=\"hero\">
-      <h1>TinyCodeTest Web Runner</h1>
-      <p>Local tool: upload dataset, pick models, run eval, and open the generated report.</p>
+      <h1>TinyCode Web </h1>
     </div>
     {body}
   </div>

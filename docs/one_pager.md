@@ -31,7 +31,19 @@ Reward is deterministic because verifier logic is deterministic and uses fixed t
 - Reproducible results across seeds and reruns
 
 ## Interpreting Uncertainty
-- Confidence intervals are optional (`--confidence-intervals`) and are computed with bootstrap resampling.
-- Intervals are shown for pass@k metrics in JSON, leaderboard markdown, and HTML report error bars.
-- With low sample counts (`samples_per_task` or `max_tasks` too small), intervals can be wide.
-- For tighter comparisons, increase both task count and samples per task (for example `samples_per_task >= 10`).
+When enabled with `--confidence-intervals`, pass@k metrics include 95% confidence intervals.
+
+Method:
+- Non-parametric bootstrap resampling of per-task pass@k estimates
+- 2000 bootstrap samples by default
+- Applied to overall, adversarial, and difficulty-split pass@k aggregates
+
+Interpretation:
+- narrow intervals (for example width < 0.10): estimate is relatively stable
+- wide intervals (for example width > 0.20): increase tasks and/or samples per task
+- with very small runs, intervals can be broad even when point estimates look separated
+
+When to use:
+- comparing models with small score gaps
+- publishing benchmark results
+- sensitivity checks across prompts/configs/seeds

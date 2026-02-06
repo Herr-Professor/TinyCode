@@ -7,6 +7,14 @@ It ships an end-to-end benchmark stack:
 - sandboxed deterministic verifier (unit tests + timeout)
 - eval runner that writes leaderboard tables and JSON artifacts
 
+## Quick Start Decision Tree
+I want to:
+- run a quick baseline: `python3 scripts/run_baselines.py`
+- evaluate my API model: use the "Optional Real-Model Baseline" section below
+- use a web UI: `python3 scripts/web_app.py --auto-generate-dataset`
+- integrate with Verifiers: use "Optional Verifiers Adapter"
+- add uncertainty intervals: add `--confidence-intervals` to eval commands
+
 ## Why This Matters
 This environment is designed as research infrastructure, not just a toy task:
 - fully deterministic reward for RL and eval stability
@@ -26,6 +34,7 @@ This environment is designed as research infrastructure, not just a toy task:
 - `scripts/run_baselines.py`: convenience baseline run
 - `scripts/generate_report.py`: generate an HTML dashboard report from eval JSON
 - `scripts/export_verification_trace.py`: export readable verification trace from eval JSON
+- `scripts/smoke_test.py`: one-command smoke test for dataset + eval + report artifacts
 - `scripts/validate_dataset.py`: validate dataset shape and optional canonical correctness
 - `scripts/export_train_data.py`: export prompt/completion JSONL for fine-tuning
 - `scripts/web_app.py`: local web UI (upload dataset, pick models, run eval, view report)
@@ -69,6 +78,11 @@ python3 scripts/run_eval.py \
 ### 3) Baseline Shortcut
 ```bash
 python3 scripts/run_baselines.py --max-tasks 150 --samples-per-task 5 --include-oracle
+```
+
+### 3b) One-Command Smoke Test
+```bash
+python3 scripts/smoke_test.py --keep-artifacts
 ```
 
 ### 4) Optional Real-Model Baseline (OpenAI-Compatible API)
@@ -158,19 +172,6 @@ python3 scripts/run_eval.py \
   --stem ci_example
 ```
 
-### Optional Verifiers Adapter
-TinyCodeTest remains standalone. If you also want Verifiers integration:
-```bash
-pip install verifiers
-```
-
-```python
-from tinycodetest.verifiers_adapter import create_verifiers_env
-
-env = create_verifiers_env("data/tinycodetest.jsonl")
-episode = env.reset()
-reward = env.step("def ...")
-```
 
 ### 7) Web App Wrapper (Upload + Pick Models + Run + View)
 ```bash
@@ -192,14 +193,6 @@ Web UI features:
 - optional verification trace output (`.verification.md`) that shows verifier results per task attempt (PASS/FAIL, reward, case counts, first failure reason)
 - run metadata is saved in `results/run_meta/` (or `/tmp/...` on Vercel) and artifacts in `results/web_runs/`
 
-Notes:
-- Deploy returns a preview URL and claim URL.
-- On Vercel, run files are stored in temporary server storage (`/tmp/...`) and may reset.
-- If the default dataset path does not exist, the app auto-generates one in `/tmp` (Vercel) or local workspace.
-- Default auto-generated task count is environment-aware: local=`600`, Vercel=`120`.
-- Override default generation size with `TCT_DEFAULT_TASKS`, for example: `TCT_DEFAULT_TASKS=300`.
-- In a run page, click `VERIFY` to inspect the per-attempt verification trace.
-- If you want a stable managed domain, claim the deployment URL and redeploy from your claimed project.
 
 ## Dataset Design
 Default dataset size: 600 tasks
