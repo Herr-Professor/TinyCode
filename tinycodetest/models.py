@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import urllib.parse
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -19,6 +20,40 @@ class ModelAdapter(Protocol):
 
     def generate(self, *, prompt: str, task: Task, k: int, seed: int) -> list[str]:
         ...
+
+
+def _post_json_request(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    model_label: str,
+    timeout_seconds: int = 60,
+) -> dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url=url,
+        data=data,
+        method="POST",
+        headers=headers,
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{model_label} HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"{model_label} request failed: {exc}") from exc
+
+    try:
+        raw = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{model_label} returned a non-JSON response.") from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"{model_label} returned a non-object JSON response.")
+    return raw
 
 
 def _build_code(signature: str, body: str) -> str:
@@ -325,29 +360,19 @@ class OpenAICompatibleModel:
                 {"role": "user", "content": prompt},
             ],
         }
-        data = json.dumps(payload).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         headers.update(self.extra_headers)
 
-        request = urllib.request.Request(
+        raw = _post_json_request(
             url=url,
-            data=data,
-            method="POST",
+            payload=payload,
             headers=headers,
+            model_label=self.name,
+            timeout_seconds=60,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                body = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"{self.name} HTTP {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"{self.name} request failed: {exc}") from exc
-
-        raw = json.loads(body)
         choices = raw.get("choices", [])
         if not choices:
             raise RuntimeError(f"{self.name} response had no choices.")
@@ -366,6 +391,163 @@ class OpenAICompatibleModel:
 
 
 @dataclass
+class AnthropicModel:
+    name: str = "anthropic"
+    model_name: str = ""
+    api_base: str = "https://api.anthropic.com/v1"
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    temperature: float = 0.2
+    max_tokens: int = 1024
+    anthropic_version: str = "2023-06-01"
+    extra_headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.model_name:
+            self.model_name = os.getenv("TCT_ANTHROPIC_MODEL", "")
+
+    def _request_completion(self, prompt: str) -> str:
+        api_key = os.getenv(self.api_key_env, "")
+        if not api_key:
+            raise RuntimeError(f"{self.api_key_env} is required for model `{self.name}`.")
+        if not self.model_name:
+            raise RuntimeError(
+                f"No model_name configured for `{self.name}`. Set TCT_ANTHROPIC_MODEL or model config."
+            )
+
+        url = f"{self.api_base.rstrip('/')}/messages"
+        payload = {
+            "model": self.model_name,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "system": "Return only Python code implementing the requested function.",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": self.anthropic_version,
+            "content-type": "application/json",
+        }
+        headers.update(self.extra_headers)
+
+        raw = _post_json_request(
+            url=url,
+            payload=payload,
+            headers=headers,
+            model_label=self.name,
+            timeout_seconds=60,
+        )
+        content = raw.get("content", [])
+        if not isinstance(content, list) or not content:
+            raise RuntimeError(f"{self.name} response had no content blocks.")
+
+        chunks: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = block.get("text", "")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text)
+        combined = "\n".join(chunks).strip()
+        if not combined:
+            raise RuntimeError(f"{self.name} response content was empty.")
+        return combined
+
+    def generate(self, *, prompt: str, task: Task, k: int, seed: int) -> list[str]:
+        _ = (task, seed)
+        outputs: list[str] = []
+        for _idx in range(k):
+            outputs.append(self._request_completion(prompt))
+        return outputs
+
+
+@dataclass
+class GeminiModel:
+    name: str = "gemini"
+    model_name: str = ""
+    api_base: str = "https://generativelanguage.googleapis.com/v1beta"
+    api_key_env: str = "GEMINI_API_KEY"
+    temperature: float = 0.2
+    max_tokens: int = 1024
+    extra_headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.model_name:
+            self.model_name = os.getenv("TCT_GEMINI_MODEL", "")
+
+    def _request_completion(self, prompt: str) -> str:
+        api_key = os.getenv(self.api_key_env, "")
+        if not api_key:
+            raise RuntimeError(f"{self.api_key_env} is required for model `{self.name}`.")
+        if not self.model_name:
+            raise RuntimeError(
+                f"No model_name configured for `{self.name}`. Set TCT_GEMINI_MODEL or model config."
+            )
+
+        model_id = self.model_name.strip()
+        if model_id.startswith("models/"):
+            model_id = model_id[len("models/") :]
+        encoded_key = urllib.parse.quote(api_key, safe="")
+        url = f"{self.api_base.rstrip('/')}/models/{model_id}:generateContent?key={encoded_key}"
+        payload = {
+            "systemInstruction": {
+                "parts": [
+                    {"text": "Return only Python code implementing the requested function."},
+                ]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": self.max_tokens,
+            },
+        }
+        headers = {"content-type": "application/json"}
+        headers.update(self.extra_headers)
+
+        raw = _post_json_request(
+            url=url,
+            payload=payload,
+            headers=headers,
+            model_label=self.name,
+            timeout_seconds=60,
+        )
+        candidates = raw.get("candidates", [])
+        if not isinstance(candidates, list) or not candidates:
+            raise RuntimeError(f"{self.name} response had no candidates.")
+        first = candidates[0] if isinstance(candidates[0], dict) else {}
+        content = first.get("content", {})
+        parts = content.get("parts", []) if isinstance(content, dict) else []
+        if not isinstance(parts, list):
+            raise RuntimeError(f"{self.name} response parts were invalid.")
+
+        chunks: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text", "")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text)
+
+        combined = "\n".join(chunks).strip()
+        if not combined:
+            raise RuntimeError(f"{self.name} response content was empty.")
+        return combined
+
+    def generate(self, *, prompt: str, task: Task, k: int, seed: int) -> list[str]:
+        _ = (task, seed)
+        outputs: list[str] = []
+        for _idx in range(k):
+            outputs.append(self._request_completion(prompt))
+        return outputs
+
+
+@dataclass
 class AliasModel:
     name: str
     inner: ModelAdapter
@@ -380,6 +562,8 @@ def builtin_models() -> dict[str, ModelAdapter]:
         "heuristic-medium": HeuristicMediumModel(),
         "reference-oracle": ReferenceOracleModel(),
         "openai-compatible": OpenAICompatibleModel(),
+        "anthropic": AnthropicModel(),
+        "gemini": GeminiModel(),
     }
 
 
@@ -413,12 +597,7 @@ def models_from_config(path: str | Path) -> dict[str, ModelAdapter]:
             registry[name] = AliasModel(name=name, inner=registry[builtin_name])
             continue
 
-        if kind != "openai-compatible":
-            raise ValueError(f"Unsupported model type `{kind}` in config for `{name}`.")
-
         model_name = str(spec.get("model", "")).strip()
-        api_base = str(spec.get("api_base", "https://api.openai.com/v1")).strip()
-        api_key_env = str(spec.get("api_key_env", "OPENAI_API_KEY")).strip()
         temperature = float(spec.get("temperature", 0.2))
         max_tokens = int(spec.get("max_tokens", 512))
         headers = spec.get("headers", {})
@@ -426,16 +605,55 @@ def models_from_config(path: str | Path) -> dict[str, ModelAdapter]:
             headers = {}
         if not isinstance(headers, dict):
             raise ValueError(f"Model `{name}` field `headers` must be an object.")
+        header_map = {str(k): str(v) for k, v in headers.items()}
 
-        registry[name] = OpenAICompatibleModel(
-            name=name,
-            model_name=model_name,
-            api_base=api_base,
-            api_key_env=api_key_env,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            extra_headers={str(k): str(v) for k, v in headers.items()},
-        )
+        if kind == "openai-compatible":
+            api_base = str(spec.get("api_base", "https://api.openai.com/v1")).strip()
+            api_key_env = str(spec.get("api_key_env", "OPENAI_API_KEY")).strip()
+            registry[name] = OpenAICompatibleModel(
+                name=name,
+                model_name=model_name,
+                api_base=api_base,
+                api_key_env=api_key_env,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_headers=header_map,
+            )
+            continue
+
+        if kind == "anthropic":
+            api_base = str(spec.get("api_base", "https://api.anthropic.com/v1")).strip()
+            api_key_env = str(spec.get("api_key_env", "ANTHROPIC_API_KEY")).strip()
+            anthropic_version = str(spec.get("anthropic_version", "2023-06-01")).strip()
+            registry[name] = AnthropicModel(
+                name=name,
+                model_name=model_name,
+                api_base=api_base,
+                api_key_env=api_key_env,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                anthropic_version=anthropic_version,
+                extra_headers=header_map,
+            )
+            continue
+
+        if kind == "gemini":
+            api_base = str(
+                spec.get("api_base", "https://generativelanguage.googleapis.com/v1beta")
+            ).strip()
+            api_key_env = str(spec.get("api_key_env", "GEMINI_API_KEY")).strip()
+            registry[name] = GeminiModel(
+                name=name,
+                model_name=model_name,
+                api_base=api_base,
+                api_key_env=api_key_env,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_headers=header_map,
+            )
+            continue
+
+        raise ValueError(f"Unsupported model type `{kind}` in config for `{name}`.")
 
     return registry
 

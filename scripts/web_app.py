@@ -72,6 +72,52 @@ def _parse_csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _is_valid_env_var_name(name: str) -> bool:
+    if not name:
+        return False
+    first = name[0]
+    if not (first.isalpha() or first == "_"):
+        return False
+    for char in name[1:]:
+        if not (char.isalnum() or char == "_"):
+            return False
+    return True
+
+
+def _parse_custom_api_env(value: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ValueError(f"Invalid custom API env entry `{line}`. Use KEY=value format.")
+        key, raw_val = line.split("=", 1)
+        key = key.strip()
+        val = raw_val.strip()
+        if not _is_valid_env_var_name(key):
+            raise ValueError(f"Invalid environment variable name `{key}`.")
+        out[key] = val
+    return out
+
+
+def _collect_api_env_overrides(
+    *,
+    openai_api_key: str,
+    anthropic_api_key: str,
+    gemini_api_key: str,
+    custom_api_env: str,
+) -> dict[str, str]:
+    out = _parse_custom_api_env(custom_api_env)
+    if openai_api_key.strip():
+        out["OPENAI_API_KEY"] = openai_api_key.strip()
+    if anthropic_api_key.strip():
+        out["ANTHROPIC_API_KEY"] = anthropic_api_key.strip()
+    if gemini_api_key.strip():
+        out["GEMINI_API_KEY"] = gemini_api_key.strip()
+    return out
+
+
 def _save_uploaded_file(field: cgi.FieldStorage, target_dir: Path, suffix: str) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
     safe_name = f"{_now_stamp()}_{uuid4().hex[:8]}{suffix}"
@@ -249,6 +295,7 @@ def _render_layout(title: str, body: str) -> bytes:
     .grid3 {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }}
     .row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }}
     .row3 {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }}
+    .stack {{ display: grid; gap: 8px; }}
     label {{ display: block; font-size: 13px; color: #4f3f2d; margin-bottom: 6px; }}
     input[type=text], input[type=number], textarea, select {{
       width: 100%;
@@ -400,6 +447,22 @@ def _index_body(error: str = "") -> str:
         <div>
           <label>Or Upload Model Config (.json)</label>
           <input type=\"file\" name=\"model_config_file\" accept=\".json\" />
+        </div>
+      </div>
+
+      <div class=\"row\">
+        <div>
+          <label>Provider API Keys (used only for this run)</label>
+          <div class=\"stack\">
+            <input type=\"password\" name=\"openai_api_key\" autocomplete=\"off\" placeholder=\"OPENAI_API_KEY (for openai-compatible)\" />
+            <input type=\"password\" name=\"anthropic_api_key\" autocomplete=\"off\" placeholder=\"ANTHROPIC_API_KEY (for anthropic models)\" />
+            <input type=\"password\" name=\"gemini_api_key\" autocomplete=\"off\" placeholder=\"GEMINI_API_KEY (for gemini models)\" />
+          </div>
+        </div>
+        <div>
+          <label>Custom API Env Keys (one per line: KEY=value)</label>
+          <textarea name=\"custom_api_env\" placeholder=\"DEEPSEEK_API_KEY=...&#10;OPENROUTER_API_KEY=...\"></textarea>
+          <div class=\"small\">Use this for any model config key name via <code>api_key_env</code>. Values are not persisted.</div>
         </div>
       </div>
 
@@ -626,6 +689,10 @@ class AppHandler(BaseHTTPRequestHandler):
         fake = {
             "dataset_path": params.get("dataset_path", str(DEFAULT_DATASET_PATH if IS_VERCEL else "data/tinycodetest.jsonl")),
             "model_config_path": params.get("model_config_path", ""),
+            "openai_api_key": params.get("openai_api_key", ""),
+            "anthropic_api_key": params.get("anthropic_api_key", ""),
+            "gemini_api_key": params.get("gemini_api_key", ""),
+            "custom_api_env": params.get("custom_api_env", ""),
             "extra_models": params.get("extra_models", ""),
             "ks": params.get("ks", "1,5"),
             "samples_per_task": params.get("samples_per_task", "5"),
@@ -654,6 +721,12 @@ class AppHandler(BaseHTTPRequestHandler):
             memory_mb_text=fake["memory_mb"],
             stem_text=fake["stem"],
             capture_attempts=bool(fake["capture_attempts"]),
+            api_env_overrides=_collect_api_env_overrides(
+                openai_api_key=fake["openai_api_key"],
+                anthropic_api_key=fake["anthropic_api_key"],
+                gemini_api_key=fake["gemini_api_key"],
+                custom_api_env=fake["custom_api_env"],
+            ),
         )
 
     def _handle_run_from_form(self, form: cgi.FieldStorage) -> str:
@@ -691,6 +764,12 @@ class AppHandler(BaseHTTPRequestHandler):
             memory_mb_text=form.getfirst("memory_mb", "256"),
             stem_text=form.getfirst("stem", ""),
             capture_attempts=bool(form.getfirst("capture_attempts", "")),
+            api_env_overrides=_collect_api_env_overrides(
+                openai_api_key=form.getfirst("openai_api_key", ""),
+                anthropic_api_key=form.getfirst("anthropic_api_key", ""),
+                gemini_api_key=form.getfirst("gemini_api_key", ""),
+                custom_api_env=form.getfirst("custom_api_env", ""),
+            ),
         )
 
     def _run_eval_job(
@@ -709,6 +788,7 @@ class AppHandler(BaseHTTPRequestHandler):
         memory_mb_text: str,
         stem_text: str,
         capture_attempts: bool,
+        api_env_overrides: dict[str, str] | None = None,
     ) -> str:
         if not dataset_path.exists():
             if _is_default_dataset_request(dataset_path):
@@ -734,6 +814,7 @@ class AppHandler(BaseHTTPRequestHandler):
         seed = _coerce_int(seed_text, 13)
         timeout = max(0.1, _coerce_float(timeout_text, 0.8))
         memory_mb = max(64, _coerce_int(memory_mb_text, 256))
+        env_overrides = dict(api_env_overrides or {})
 
         run_id = stem_text.strip() or f"web_{_now_stamp()}_{uuid4().hex[:6]}"
 
@@ -750,26 +831,39 @@ class AppHandler(BaseHTTPRequestHandler):
             tasks = load_dataset(dataset_path)
             if max_tasks > 0 and max_tasks < len(tasks):
                 tasks = TaskSampler(tasks).sample(n=max_tasks, seed=seed)
+            previous_env: dict[str, str | None] = {}
+            for key, value in env_overrides.items():
+                previous_env[key] = os.environ.get(key)
+                os.environ[key] = value
 
-            strategies = [PromptStrategy(name) for name in strategy_names]
-            models = resolve_models(
-                model_names,
-                model_config_path=str(model_config_path) if model_config_path else None,
-            )
+            try:
+                strategies = [PromptStrategy(name) for name in strategy_names]
+                models = resolve_models(
+                    model_names,
+                    model_config_path=str(model_config_path) if model_config_path else None,
+                )
 
-            payload = evaluate_suite(
-                models=models,
-                strategies=strategies,
-                tasks=tasks,
-                sandbox=SandboxConfig(timeout_seconds=timeout, memory_mb=memory_mb),
-                config=EvalConfig(
-                    samples_per_task=samples_per_task,
-                    ks=ks,
-                    seed=seed,
-                    capture_attempts=capture_attempts,
-                ),
-            )
+                payload = evaluate_suite(
+                    models=models,
+                    strategies=strategies,
+                    tasks=tasks,
+                    sandbox=SandboxConfig(timeout_seconds=timeout, memory_mb=memory_mb),
+                    config=EvalConfig(
+                        samples_per_task=samples_per_task,
+                        ks=ks,
+                        seed=seed,
+                        capture_attempts=capture_attempts,
+                    ),
+                )
+            finally:
+                for key, old_value in previous_env.items():
+                    if old_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = old_value
+
             payload["config"]["model_config"] = str(model_config_path) if model_config_path else None
+            payload["config"]["api_env_vars"] = sorted(env_overrides.keys())
             payload["dataset"] = {
                 "path": str(dataset_path),
                 "selected_tasks": len(tasks),

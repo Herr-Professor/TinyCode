@@ -23,6 +23,22 @@
       "api_key_env": "DEEPSEEK_API_KEY",
       "temperature": 0.2,
       "max_tokens": 768
+    },
+    {
+      "name": "claude-sonnet",
+      "type": "anthropic",
+      "model": "claude-3-5-sonnet-latest",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "temperature": 0.2,
+      "max_tokens": 1024
+    },
+    {
+      "name": "gemini-flash",
+      "type": "gemini",
+      "model": "gemini-1.5-flash",
+      "api_key_env": "GEMINI_API_KEY",
+      "temperature": 0.2,
+      "max_tokens": 1024
     }
   ]
 }

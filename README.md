@@ -84,11 +84,13 @@ Copy and edit `configs/models.example.json`, then run:
 ```bash
 export LOCAL_LLM_API_KEY=...
 export DEEPSEEK_API_KEY=...
+export ANTHROPIC_API_KEY=...
+export GEMINI_API_KEY=...
 
 python3 scripts/run_eval.py \
   --dataset data/tinycodetest.jsonl \
   --model-config configs/models.example.json \
-  --models qwen-small-local,deepseek-medium-hosted,heuristic-small-alias \
+  --models qwen-small-local,deepseek-medium-hosted,claude-sonnet,gemini-flash,heuristic-small-alias \
   --strategies direct,plan_then_code \
   --samples-per-task 5 \
   --ks 1,5 \
@@ -97,6 +99,12 @@ python3 scripts/run_eval.py \
   --output-dir results \
   --stem byo_models
 ```
+
+Supported config model types:
+- `openai-compatible`
+- `anthropic`
+- `gemini`
+- `builtin` (aliasing built-ins)
 
 ### 6) Bring Your Own Dataset + Train Export
 Validate your dataset:
@@ -130,6 +138,7 @@ Open:
 Web UI features:
 - upload a dataset JSONL or use an existing path
 - upload/select model config JSON and pick models
+- enter provider API keys in the form (OpenAI, Anthropic, Gemini) or custom `KEY=value` env entries per run
 - choose strategies + eval settings
 - run evaluation from the browser
 - open JSON/Markdown/HTML artifacts and preview report directly
