@@ -1,0 +1,28 @@
+{
+  "models": [
+    {
+      "name": "heuristic-small-alias",
+      "type": "builtin",
+      "builtin": "heuristic-small"
+    },
+    {
+      "name": "qwen-small-local",
+      "type": "openai-compatible",
+      "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+      "api_base": "http://localhost:8000/v1",
+      "api_key_env": "LOCAL_LLM_API_KEY",
+      "temperature": 0.2,
+      "max_tokens": 512,
+      "headers": {}
+    },
+    {
+      "name": "deepseek-medium-hosted",
+      "type": "openai-compatible",
+      "model": "deepseek-coder-v2",
+      "api_base": "https://your-provider.example.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "temperature": 0.2,
+      "max_tokens": 768
+    }
+  ]
+}

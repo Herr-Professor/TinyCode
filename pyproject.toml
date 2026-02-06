@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinycodetest"
+version = "0.1.0"
+description = "Deterministic RL environment and benchmark for Python coding tasks"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "TinyCodeTest" }]
+dependencies = []
+
+[tool.setuptools]
+packages = ["tinycodetest"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

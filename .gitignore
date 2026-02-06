@@ -1,0 +1,53 @@
+# macOS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.eggs/
+*.egg-info/
+build/
+dist/
+pip-wheel-metadata/
+
+# Virtual environments / local env
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.env
+.env.*
+
+# Vercel local metadata
+.vercel/
+
+# Logs
+*.log
+
+# TinyCodeTest generated artifacts
+results/
+
+# Uploaded files from web wrapper
+data/uploads/
+configs/uploads/
+
+# Generated datasets / train exports
+data/tinycodetest.jsonl
+data/tinycodetest_adversarial.jsonl
+data/train/
+
+# Optional local temp files
+*.tmp
+*.temp
